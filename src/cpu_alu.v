@@ -81,7 +81,7 @@ module CPU_ALU(input [7:0]vx, vy, input [3:0] op, output [7:0]result, output fla
 
   always @(*) begin
     case (op)
-      4'h0: {out, flag, write_vf} = {vy     , 1'd0 , 1'b0}; // b
+      4'h0: {out, flag, write_vf} = {vy     , 1'd0 , 1'b0}; // COPY y
       4'h1: {out, flag, write_vf} = {vx | vy, 1'd0 , 1'b0}; // OR
       4'h2: {out, flag, write_vf} = {vx & vy, 1'd0 , 1'b0}; // AND
       4'h3: {out, flag, write_vf} = {vx ^ vy, 1'd0 , 1'b0}; // XOR
@@ -90,7 +90,7 @@ module CPU_ALU(input [7:0]vx, vy, input [3:0] op, output [7:0]result, output fla
       4'h6: {out, flag, write_vf} = {vx>>1  , vx[0], 1'b1}; // SHR
       4'h7: {out, flag, write_vf} = {adds   , addc , 1'b1}; // SUB y - x (? same as ^^)
       4'hE: {out, flag, write_vf} = {vx<<1  , vx[7], 1'b1}; // SHL
-      default: {out, flag, write_vf} = {vx  , 1'd0 , 1'b0};
+      default: {out, flag, write_vf} = {vx  , 1'd0 , 1'b0}; // COPY x
     endcase
   end
 endmodule
