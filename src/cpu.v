@@ -131,37 +131,35 @@ module CPU(
   // S1B (before begin of normal cycle, only lower bits of opcode are determined)
 
   // STAGE TWO - COMPUTE INSTRUCTION
-  // 00EE => RET  S1B| pp  <= 1                           |            laa <= top lab <= 2    |S1E
-  // 0NNN => IGN  |S1B                                    |            laa <= PC  lab <= 2    |S1E
-  // 1NNN => JMP  |S1B                                    |            laa <= NNN lab <= 0    |S1E
-  // 2NNN => CALL |S1B pp  <= 1                           |            laa <= NNN lab <= 0    |S1E
-  // bNNN => JMPO |S1B                                    |            laa <= NNN lab <= V[0] |S1E
-  // aNNN => LDI  |S1B i   <= NNN                         |            laa <= PC  lab <= 2    |S1E
-  // Fx1E => ADI  S1B|            laa <= I   lab <= V[x]  |  I <= las  laa <= PC  lab <= 2    |S1E
+  // 00EE => RET  S1B|    pp  <= 1   laa <= top lab <= 2     |--------------------------------->S1E
+  // 0NNN => IGN     |S1B            laa <= PC  lab <= 2     |--------------------------------->S1E
+  // 1NNN => JMP     |S1B            laa <= NNN lab <= 0     |--------------------------------->S1E
+  // 2NNN => CALL    |S1B pp  <= 1   laa <= NNN lab <= 0     |--------------------------------->S1E
+  // bNNN => JMPO    |S1B            laa <= NNN lab <= V[0]  |--------------------------------->S1E
+  // aNNN => LDI     |S1B i   <= NNN laa <= PC  lab <= 2     |--------------------------------->S1E
+  // Fx1E => ADI  S1B|               laa <= I   lab <= V[x]  |  I <= las  laa <= PC  lab <= 2  |S1E
   // 
   // 3XKK => SKIPEQ, 4KKK => SKIPNE, 5XY0 SKIPEQ
   // 9XY0 => SKIPNE
   // Ex9E - SKP Vx
-  // x Skip next instruction if key with the value of Vx is pressed.
   // ExA1 - SKNP Vx
-  // x Skip next instruction if key with the value of Vx is not pressed.
-  // Fx0A - LD Vx, K
-  // x Wait for a key press, store the value of the key in Vx.
-  //            S1B|  <comparator> Vx <= key | wait------- | laa <= PC  lab <= 2  |S1E
+  //              S1B|  <comp<=inp>                          |     laa <= PC  lab <= comp?2:0  |S1E
+  // Fx0A - WAITK Vx
+  //              S1B|  <comp> Vx<=key laa<=PC  lab<=2   wait|--------------------------------->S1E
   // 
   // 6XKK => LOAD X<=KK
   // 7XKK => ADD X<=X+KK
-  //            |S1B  alu <= vxKK aluo <= op | vx <= alures  laa <= PC  lab <= 2 |S1E
+  //            |S1B  alu <= vxKK aluo <= op                 | vx <= alures laa <= PC lab <= 2 |S1E
   // 8XYO => ALU OPERATION Vx/Vf <= OP Vx Vy
-  //            |S1B  alu <= vxvy aluo <= op | vx <= alures  laa <= PC  lab <= 2 |S1E
+  //            |S1B  alu <= vxvy aluo <= op                 | vx <= alures laa <= PC lab <= 2 |S1E
   // cXKK => RNG Vx<=RAND&KK
-  //            |S1B  alu <= RRKK aluo <= &  | vx <= alures  laa <= PC  lab <= 2 |S1E
+  //            |S1B  alu <= RRKK aluo <= &                  | vx <= alures laa <= PC lab <= 2 |S1E
   // 
   // Fx07 - LD Vx, DT
-  //            S1B|  vx <= dt laa <= PC lab <= 2  |S1E
+  //            S1B|  vx <= dt laa <= PC lab <= 2            |--------------------------------->S1E
   // Fx15 - LD DT, Vx
   // Fx18 - LD ST, Vx
-  //            S1B|  tmin <= Vx tmload <= 1 laa <= PC lab <= 2 | tmload <= 0  S1E|
+  //            S1B| tmin<=Vx tmload<=1 laa<=PC lab<=2       |-------------------->tmload <= 0 S1E|
   // 
   // 00E0 => GPU CLEAR
   // x   GPU, clear the screen
