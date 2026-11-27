@@ -3,19 +3,61 @@
 // https://github.com/mattmikolay/chip-8/wiki/CHIP%E2%80%908-Instruction-Set
 module CPU(
   // clocks and timing
-  input tick_fsm,      // the FSM advances by one step on rising edge
-  input tick_en_instr, // gate for CPU clock. enabled when the current tick should progress the CPU one cycle
-  input tick_en_60hz , // gate for the timers. enabled 60 times per second to decrement them
+  input        tick_fsm,      // the FSM advances by one step on rising edge
+  input        tick_en_instr, // gate for CPU clock. enabled when the current tick should progress the CPU one cycle
+  input        tick_en_60hz , // gate for the timers. enabled 60 times per second to decrement them
   // peripheral I/O
-  input [15:0]keeb,      // keyboard state, one-hot (but more than one can be hot) encoding
-  input  [3:0]keeb_last, // last key pressed, number encoding
-  input  [7:0]rand,      // random number
-  output reg  tone,      // indicate to the audio subsystem that it should play a tone
+  input [15:0] keeb,      // keyboard state, one-hot (but more than one can be hot) encoding
+  input  [3:0] keeb_last, // last key pressed, number encoding
+  input  [7:0] rand,      // random number
+  output reg   tone,      // indicate to the audio subsystem that it should play a tone
   // memory
-  output [15:0]mem_addr,
-  output  [7:0]mem_read_data,
-  output  [7:0]mem_write_data,
-  output       mem_write_en,
+  output [15:0] mem_addr,
+  output  [7:0] mem_read_data,
+  output  [7:0] mem_write_data,
+  output        mem_write_en,
+  // --- GFX ---
+// High for one cycle to start a command; all the graphics outputs below must already hold the right values. Only sent when ‘gfx_busy’ is 0.
+output gfx_start,
+// Picks the command for the graphics
+// 0 → CLEAR
+// XO-CHIP also clears the screen when switching between lo-res and hi-res.
+// 1 → DRAW
+// 2 → SCROLL DOWN
+// 3 → SCROLL RIGHT
+// 4 → SCROLL LEFT
+// 5 → SCROLL UP (XO-CHIP only)
+output [2:0] gfx_cmd,
+// Value of VX/VY label: which is where the sprite’s left edge goes
+output [7:0] gfx_x, gfx_y,
+// For DRAW: dictates how many rows tall the sprite is (1-15; 0 means a 16x16 sprite, 1-15 means N rows and 8 wide). This is how the original CHIP-8 sprite works
+// SUPER CHIP does 8x16 in lo-res mode when gfx_n is 0
+// For SCROLL DOWN/UP: dictates how many rows to scroll
+output [3:0] gfx_n,
+  // Value of I: the memory address of the sprite’s first byte. 16 bits for XO-CHIP
+  output [15:0] gfx_i,
+  // Dictates which color layer(s) a command affects. Bit 0 = plane 1, bit 1 = plane 2.
+  // SUPER-CHIP uses 1 plane, always 2’b01
+  // XO-CHIP uses twice as many sprite bytes if both bits are set
+  output reg [1:0] gfx_plane,
+  // Dictates the current screen mode: 1 = 128 x 64, 0 = 64 x 32
+  output reg hires,
+// After a DRAW, 1 if the spire turned off any pixel that was already on, else 0. The CPU copies it into VF so the game can detect hits
+input gfx_collision,
+  // --- Audio! ---
+  // How fast the sound pattern plays, which dictates the pitch. The rate is 4000 x 2^((pitch - 64)/48) bits per second, so 64 = 4000 bits per second.
+  output reg [7:0] audio_pitch,
+// A 128-bit (16 bytes) waveform that the audio module plays one bit at a time while tone is 1.
+output reg [7:0]audio_pattern[15:0],
+  // --- Debug Interface ---
+  // The program counter. We can show this on the 7-segment display so we can see where the game is
+  output [15:0] dbg_pc,
+  // The instruction currently running, also can be shown on the 7-segment display for debugging purposes.
+  output [15:0] dbg_opcode,
+  // 1 after exiting. Forces the CPU to stop until reset.
+  output reg halted,
+  // Outputs a 1 if the CPU fetches a non-usable instruction. Forces the CPu to halt so the program counter and the opcode remain on the display, making debugging easier.
+  output reg bad_opcode; // ❗ even if this is partially implemented, it wont catch everything and some invalid inputs will cause UB
 );
   // --- RAM addressing ---
   // 0000-01FF: allocated for the "emulator". we shall use this for storing useful things
@@ -151,6 +193,9 @@ module CPU(
 
   // --- STATE ---
   reg [5:0]state;
+  // set to 1 when the next "opcode" read in is actually a 2-byte argument for the previous instruction
+  // used only by XO-CHIP F000 load long
+  reg fetch_large_argument;
   reg [15:0]opcode;
 
   wire [11:0] nnn;
@@ -176,6 +221,14 @@ module CPU(
       default:  comparator <= 1'b0;
     endcase
 
+  // --- Debug Interface ---
+  assign dbg_pc = pc;
+  assign dbg_opcode = opcode;
+
+  // --- Graphics ---
+  assign gfx_i = i;
+
+  // --- States ---
   localparam SPRESET     = 6'b000000; // reset? or something?
   // -- GATED ON tick_en_instr --
   localparam SREADHI     = 6'b000001; // read opcode high byte
@@ -202,7 +255,7 @@ module CPU(
   // S1B (before begin of normal cycle, only lower bits of opcode are determined)
   // Named States -- S1L | S1B | S2X | S2Y | S1E -> (loop) 
 
-  always @(posedge tick_fsm) begin
+  always @(posedge tick_fsm) if (~halted) begin
     casez (state)
       SPRESET: begin
         // TODO
@@ -215,8 +268,16 @@ module CPU(
       SREADLO: begin
         opcode[0+:8] <= mem_read_data;
         // -- S1B --
-        // <don't actually do anything here, it's an optimization that ultimately will not matter at all
-        state <= SCOMP_START;
+        if (fetch_large_argument) begin
+          // phase II of 0xF000 `LDI long`
+          i <= fetch_large_argument;
+          spec_add_16b <= pc;
+          spec_add_8b <= 8'd2;
+          state <= SSETPC;
+        end else begin
+          // normal begin instruction
+          state <= SCOMP_START;
+        end
       end
       SCOMP_START: begin
         casez (opcode)
@@ -224,7 +285,7 @@ module CPU(
           16'h00EE: begin stack_pp <= 1; spec_add_16b <= stack_top; spec_add_8b <= 8'd2; state <= SSETPC; end
           // 0NNN => IGN  S1B|            laa <= PC  lab <= 2     |--------------------------------->S1E
           // IGNORED (call machine language instruction doesn't even make sense... this isn't an emulator!)
-          16'h0xxx: begin                spec_add_16b <= pc;        spec_add_8b <= 8'd2; state <= SSETPC; end 
+          // 16'h0xxx: NOT IMPLEMENTED because some SCHIP/XO-CHIP instructions use this!
           // 1NNN => JMP  S1B|            laa <= NNN lab <= 0     |--------------------------------->S1E
           16'h1xxx: begin                spec_add_16b <= stack_top; spec_add_8b <= 8'd0; state <= SSETPC; end
           // 2NNN => CALL S1B| pp  <= 1   laa <= NNN lab <= 0     |--------------------------------->S1E
@@ -235,6 +296,10 @@ module CPU(
           16'hBxxx: begin                spec_add_16b <= nnn;       spec_add_8b <= v0;   state <= SSETPC; end
           // Fx1E => ADI  S1B|            laa <= I   lab <= V[x]  |  I <= las  laa <= PC  lab <= 2  |S1E
           16'hFx1E: begin                spec_add_16b <= i;         spec_add_8b <= vx;   state <= SCOMP_ESETI; end
+
+          // i := long NNNN (0xF000, 0xNNNN) load i with a 16-bit address.
+          16'hF000: begin
+           fetch_large_argument <= 1'b1; spec_add_16b <= pc;        spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // 3XKK => SKIPEQ, 4KKK => SKIPNE, 5XY0 SKIPEQ
           // 9XY0 => SKIPNE
@@ -264,9 +329,57 @@ module CPU(
           // Fx18 - LD ST, Vx
           //            S1B| tmin<=Vx tmload<=1 laa<=PC lab<=2       |-------------------->tmload <= 0 S1E|
           16'hFx15, 16'hFx18: begin tmdelay_load <= 1'b1; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
+          // pitch := vx (0xFX3A) set the audio pattern playback rate to 4000*2^((vx-64)/48)Hz.
+          16'hFx3A:           begin audio_pitch  <= vx;   spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
-          // ignore invalid/unimplemented instructions
-          default : begin spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end;
+          // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
+          16'hFx01: begin gfx_plane <= opcode[8+:4];    spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
+          // 00FE*    Disable extended screen mode
+          // 00FF*    Enable extended screen mode for full-screen graphics
+          16'h00FE, 16'h00FF: begin hires <= opcode[0]; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
+
+          // 00E0 => GPU CLEAR
+          // x   GPU, clear the screen
+
+          // 00CN*    Scroll display N lines down
+          // 00FB*    Scroll display 4 pixels right
+          // 00FC*    Scroll display 4 pixels left
+
+          // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
+
+          // Dxyn - DRW Vx, Vy, nibble
+          // x Display (XOR) n-byte sprite starting at memory location I at (Vx, Vy), set VF if any pixels are erased.
+          // DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision. If N=0 and extended mode, show 16x16 sprite.
+
+          // Fx29 - LD F, Vx
+          // x Set I = location of **5-byte** sprite for hex digit Vx.
+
+          // FX30*    Point I to **10-byte** font sprite for digit VX (0..9)
+
+          // Fx33 - LD B, Vx
+          // x Store BCD representation of Vx in memory locations I, I+1, and I+2.
+
+          // Fx55 - LD [I], Vx
+          // x Store registers V0 through Vx in memory starting at location I.
+          // Fx65 - LD Vx, [I]
+          // x Read registers V0 through Vx from memory starting at location I.
+
+          // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i. (ORDER CAN BE DECENDING OR ASCENDING!)
+          // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i. (ORDER CAN BE DESCENDING OR ASCENDING!)
+
+          // FX75*    Store V0..VX in RPL user flags (X <= 7)
+          // FX85*    Read V0..VX from RPL user flags (X <= 7) 
+
+          // saveflags vx (0xFN75) save v0-vn to flag registers. (generalizing SCHIP).
+          // loadflags vx (0xFN85) restore v0-vn from flag registers. (generalizing SCHIP).
+
+          // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer.
+                    
+          // 00FD*    Exit CHIP interpreter
+          16'h00FD: begin halted <= 1'b1; end
+          
+          // report errors / invalid instructions
+          default : begin halted <= 1'b1; bad_opcode <= 1'b1; end;
         endcase
       end
       SCOMP_ESETI: begin
@@ -293,6 +406,29 @@ module CPU(
       default state <= SPRESET;
     endcase
   end
+
+  // XO-CHIP
+  // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i.
+  // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i.
+  // saveflags vx (0xFN75) save v0-vn to flag registers. (generalizing SCHIP).
+  // loadflags vx (0xFN85) restore v0-vn from flag registers. (generalizing SCHIP).
+  // i := long NNNN (0xF000, 0xNNNN) load i with a 16-bit address.
+  // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
+  // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer.
+  // pitch := vx (0xFX3A) set the audio pattern playback rate to 4000*2^((vx-64)/48)Hz.
+  // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
+
+  // SCHIP
+  // 00CN*    Scroll display N lines down
+  // 00FB*    Scroll display 4 pixels right
+  // 00FC*    Scroll display 4 pixels left
+  // 00FD*    Exit CHIP interpreter
+  // 00FE*    Disable extended screen mode
+  // 00FF*    Enable extended screen mode for full-screen graphics
+  // DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF :=
+  // FX30*    Point I to 10-byte font sprite for digit VX (0..9)
+  // FX75*    Store V0..VX in RPL user flags (X <= 7)
+  // FX85*    Read V0..VX from RPL user flags (X <= 7) 
   
   // STAGE TWO - COMPUTE INSTRUCTION
   // 00EE => RET  S1B|    pp  <= 1   laa <= top lab <= 2     |--------------------------------->S1E
@@ -340,10 +476,6 @@ module CPU(
   // x Store registers V0 through Vx in memory starting at location I.
   // Fx65 - LD Vx, [I]
   // x Read registers V0 through Vx from memory starting at location I.
-
-
-
-
 
   
   // -X-- can index Vx
