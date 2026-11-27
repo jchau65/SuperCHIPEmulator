@@ -47,8 +47,8 @@ module CPU(
   // --- Audio! ---
   // How fast the sound pattern plays, which dictates the pitch. The rate is 4000 x 2^((pitch - 64)/48) bits per second, so 64 = 4000 bits per second.
   output reg [7:0] audio_pitch,
-// A 128-bit (16 bytes) waveform that the audio module plays one bit at a time while tone is 1.
-output reg [7:0]audio_pattern[15:0],
+  // A 128-bit (16 bytes) waveform that the audio module plays one bit at a time while tone is 1.
+  output reg [7:0]audio_pattern[15:0],
   // --- Debug Interface ---
   // The program counter. We can show this on the 7-segment display so we can see where the game is
   output [15:0] dbg_pc,
@@ -72,38 +72,16 @@ output reg [7:0]audio_pattern[15:0],
   //            this region is *not* executable
 
   // --- General Vx registers V0-VF ---
-  wire [7:0] vx, vy, v0; // used by opcodes generally
-  reg       reg_wclock; // rising edge
+  wire [7:0] vx, vy; // used by opcodes generally
   wire      reg_write; // hold through clock to write reg_waddr
   wire [3:0]reg_waddr;
   wire [7:0]reg_wdata;
-  wire      reg_flag_set; // hold through clock to set VF
-  wire      reg_flag_val;
   CPU_REG_FILE registers(
     .rd_x(opcode[8+:4]), .vx(vx),
-    .rd_y(opcode[4+:4]), .vy(vy), .v0(v0),
-    .clock(reg_wclock),
+    .rd_y(opcode[4+:4]), .vy(vy),
+    .clock(tick_fsm),
     .write(reg_write), .write_addr(reg_waddr), .write_data(reg_wdata),
-    .set_flag(reg_flag_set), .flag_val(reg_flag_val),
   );
-
-  // 6XKK => LOAD X<=KK
-  // 7XKK => ADD X<=X+KK
-  // 8XYO => ALU OPERATION Vx/Vf <= OP Vx Vy
-  // cXKK => RNG Vx<=RAND&KK
-  //            |S1B  <cfg ALU> || write <= 1 waddr <= x wdata <= res rfs <= aluwf rfv <= aluf | rclk <= 1 laa <= PC lab <= 2 |S1E
-  // 
-  // Fx07 - LD Vx, DT
-  //            |S1B  <cfg reg>                                                                | rclk <= 1 laa <= PC lab <= 2  |S1E
-  always @(*) casez (opcode)
-    16'h6???, 16'h7???, 16'h8???, 16'hC???: begin
-      reg_write <= 1'b1; reg_waddr <= opcode[8+:4]; reg_wdata <=  alu_result; reg_flag_set <= alu_flag_set; reg_flag_val <= alu_flag; end
-    16'hF?07: begin
-      reg_write <= 1'b1; reg_waddr <= opcode[8+:4]; reg_wdata <= tmdelay_val; reg_flag_set <= 1'b0;         reg_flag_val <= 1'b0;     end
-    default: begin
-      reg_write <= 1'b0; reg_waddr <= 4'd0;         reg_wdata <= 8'd0;        reg_flag_set <= 1'b0;         reg_flag_val <= 1'b0;     end
-  endcase
-
 
   // --- Program Counter and Index Register---
   // 12-bit for the typical 4096 bytes of RAM (does long jump even exist?)
@@ -249,6 +227,30 @@ output reg [7:0]audio_pattern[15:0],
       default:  begin gfx_cmd <= 4'd0; gfx_n <= 3'd4;         end
     endcase
 
+  // --- Memory Stuff ---
+  // read direction: 1 = forward, 0 = reverse
+  wire lw_read_direction;
+  assign lw_read_direction = (opcode === 16'h5xx2 | opcode === 16'h5xx3) ? opcode[8+:4] >= opcode[4+:4] : 1;
+  // large write end offset - writing to the target at addr+:(lw_end_offset+1)
+  reg [3:0]lw_end_offset;
+  always @(*)
+    casex (opcode)
+      // Fx33 - LD B, Vx   Store BCD representation of Vx in memory locations I, I+1, and I+2.
+      16'hFx33: lw_end_offset <= 4'd3;
+      // Fx55 - LD [I], Vx   Store registers V0 through Vx in   memory starting at location I.
+      // Fx65 - LD Vx, [I]   Read  registers V0 through Vx from memory starting at location I.
+      // saveflags vx (0xFN75) save v0-vn to flag registers. (generalizing SCHIP).
+      // loadflags vx (0xFN85) restore v0-vn from flag registers. (generalizing SCHIP).
+      16'hFx55, 16'hFx65, 16'hFx75, 16'hFx85: lw_end_offset <= opcode[8+:4];
+      // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i. (ORDER CAN BE DECENDING OR ASCENDING!)
+      // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i. (ORDER CAN BE DESCENDING OR ASCENDING!)
+      //                  lw_end_offset <= x > y ? x - y : y - x
+      16'h5xx2, 16'h5xx3: lw_end_offset <= opcode[8+:4] > opcode[4+:4] ? opcode[8+:4] - opcode[4+:4] : opcode[4+:4] - opcode[8+:4];
+      // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer.
+      16'hF002: lw_end_offset <= 4'd15;
+      default:  lw_end_offset <= 4'd0;
+    endcase
+
   // --- States ---
   localparam SPRESET       = 6'b000000; // reset? or something?
   // -- GATED ON tick_en_instr --
@@ -259,6 +261,7 @@ output reg [7:0]audio_pattern[15:0],
   localparam SCOMP_START   = 6'b000100;
   localparam SCOMP_ESETI   = 6'b001100; // for I <= NNN + Vx we need to use spec_adder twice, which takes an extra cycle
   localparam SCOMP_GFXWAIT = 6'b010100; // wait for gfx_busy to be zero
+  localparam SCOMP_ALUWFLG = 6'b011100; // alu writeback flag
   // S1E
   localparam SSETPC        = 6'h000011; // update PC value
 
@@ -341,11 +344,12 @@ output reg [7:0]audio_pattern[15:0],
           //            |S1B  alu <= vxvy aluo <= op || write <= 1 waddr <= x wdata <= res rfs <= aluwf rfv <= aluf | rclk <= 1 laa <= PC lab <= 2 |S1E
           // cXKK => RNG Vx<=RAND&KK
           //            |S1B  alu <= RRKK aluo <= &  || write <= 1 waddr <= x wdata <= res rfs <= aluwf rfv <= aluf | rclk <= 1 laa <= PC lab <= 2 |S1E
-          // 
+          16'h6xxx, 16'h7xxx, 16'h8xxx, 16'hCxxx: begin
+            reg_write <= 1'b1; reg_waddr <= opcode[8+:4]; reg_wdata <= alu_result; state <= SCOMP_ALUWFLG; end
           // Fx07 - LD Vx, DT
           //            |S1B  <cfg reg>                                                                             | rclk <= 1 laa <= PC lab <= 2 |S1E
-          16'h6xxx, 16'h7xxx, 16'h8xxx, 16'hCxxx, 16'hFx07: begin
-            reg_wclock <= 1; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
+          16'hFx07: begin
+            reg_write <= 1'b1; reg_waddr <= opcode[8+:4]; reg_wdata <= tmdelay_val; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // Fx15 - LD DT, Vx
           // Fx18 - LD ST, Vx
@@ -373,19 +377,65 @@ output reg [7:0]audio_pattern[15:0],
           // FX30*    Point I to **10-byte** font sprite for digit VX (0..9)
           16'hFx29, 16'hFx30: begin i <= char_addr; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
-          // Fx33 - LD B, Vx
-          // x Store BCD representation of Vx in memory locations I, I+1, and I+2.
+          // inputs 
+          //   - vx_as_bcd (len 3)
+          //   - M(I+:16) (len 16)
+          // outputs
+          //   - M(I+:3)
+          //   - audio_pattern
+          //
+          // inputs and outputs
+          //   x V0-Vx  (len Vx+1) (generalized)
+          //   x M(I+:Vx+1) (len Vx+1) (generalized)
+          // 
+          //   - F0-Fx  (end offset Vx)
+          //   - Vx-Vy  (end offset (x > y ? x - y : y - x))
+          //   - M(I+:len) (end offset ^^)
+        
+          // wire lw_read_direction;
+          // reg [3:0]lw_end_offset;
+          // reg [3:0]lw_offset;
+          // wire [3:0]lr_offset;
+          // assign lr_offset = lw_read_direction ? lw_offset : 4'd15 - lw_offset;
+          // 
+          // wire      reg_write; // hold through clock to write reg_waddr
+          // wire [3:0]reg_waddr;
+          // wire [7:0]reg_wdata;
+          //
+          // --- init
+          // lw_offset <= 0
+          // laa <= i
+          // lab <= 0 (lw_offset)
+          // reg_wclockg <= write registers?
+          // state <= case () ...
+          // 
+          // --- BCD 
+          // mem_addr <= las,
+          // mem_write_data <= vx_as_bcd[lr_offset],
+          // mem_write_en <= 1,
+          //
+          // if lw_offset >= lw_end_offset
+          //   state <= SCOMP_LWDONE
+          //
+          // --- Fx55/5xy2 (WMEM)
+          // 
+          // --- Fx55/5xy2 (RMEM)
+          //
+          // --- Fx75 (WFLAG)
+          //
+          // --- Fx85 (RFLAG)
+          //
+          // --- SCOMP_LWDONE
+          // mem_write_en <= 1'b0;
+          // spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC;
 
-          // Fx55 - LD [I], Vx
-          // x Store registers V0 through Vx in memory starting at location I.
-          // Fx65 - LD Vx, [I]
-          // x Read registers V0 through Vx from memory starting at location I.
+          // Fx33 - LD B, Vx   Store BCD representation of Vx in memory locations I, I+1, and I+2.
+
+          // Fx55 - LD [I], Vx   Store registers V0 through Vx in   memory starting at location I.
+          // Fx65 - LD Vx, [I]   Read  registers V0 through Vx from memory starting at location I.
 
           // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i. (ORDER CAN BE DECENDING OR ASCENDING!)
           // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i. (ORDER CAN BE DESCENDING OR ASCENDING!)
-
-          // FX75*    Store V0..VX in RPL user flags (X <= 7)
-          // FX85*    Read V0..VX from RPL user flags (X <= 7) 
 
           // saveflags vx (0xFN75) save v0-vn to flag registers. (generalizing SCHIP).
           // loadflags vx (0xFN85) restore v0-vn from flag registers. (generalizing SCHIP).
@@ -411,12 +461,24 @@ output reg [7:0]audio_pattern[15:0],
         spec_add_8b <= 8'd2;
         state <= SSETPC;
       end
+      SCOMP_ALUWFLG: begin
+        if (alu_flag_set) begin
+          reg_write <= 1'b1;
+          reg_waddr <= 4'hF;
+          reg_wdata <= {7'h0, alu_flag};
+        end else begin
+          reg_write <= 1'b0;
+        end
+        spec_add_16b <= pc;
+        spec_add_8b <= 8'd2;
+        state <= SSETPC;
+      end
       SSETPC: begin
         // -- S1E --
         tmdelay_load <= 1'b0; // stop loading timers
         tmsound_load <= 1'b0;
         stack_pp <= 1'b0; // end stack operation
-        reg_wclock <= 1'b0; // end reg write
+        reg_write <= 1'b0; // end reg write
         gfx_start <= 1'b0; // end gfx op
         // -- normal SSETPC content --
         // update PC
