@@ -27,9 +27,9 @@ module CPU(
   // 3 → SCROLL RIGHT
   // 4 → SCROLL LEFT
   // 5 → SCROLL UP (XO-CHIP only)
-  output reg [2:0] gfx_cmd,
-// Value of VX/VY label: which is where the sprite’s left edge goes
-output [7:0] gfx_x, gfx_y,
+  output [2:0] gfx_cmd,
+  // Value of VX/VY label: which is where the sprite’s left edge goes
+  output [7:0] gfx_x, gfx_y,
   // For DRAW: dictates how many rows tall the sprite is (1-15; 0 means a 16x16 sprite, 1-15 means N rows and 8 wide). This is how the original CHIP-8 sprite works
   // SUPER CHIP does 8x16 in lo-res mode when gfx_n is 0
   // For SCROLL DOWN/UP: dictates how many rows to scroll
@@ -42,8 +42,8 @@ output [7:0] gfx_x, gfx_y,
   output reg [1:0] gfx_plane,
   // Dictates the current screen mode: 1 = 128 x 64, 0 = 64 x 32
   output reg hires,
-// After a DRAW, 1 if the spire turned off any pixel that was already on, else 0. The CPU copies it into VF so the game can detect hits
-input gfx_collision,
+  // After a DRAW, 1 if the spire turned off any pixel that was already on, else 0. The CPU copies it into VF so the game can detect hits
+  input gfx_collision,
   // --- Audio! ---
   // How fast the sound pattern plays, which dictates the pitch. The rate is 4000 x 2^((pitch - 64)/48) bits per second, so 64 = 4000 bits per second.
   output reg [7:0] audio_pitch,
@@ -227,18 +227,38 @@ output reg [7:0]audio_pattern[15:0],
 
   // --- Graphics ---
   assign gfx_i = i;
+  assign gfx_x = vx;
+  assign gfx_y = vy;
+
+  always @(*)
+    casez (opcode)
+      // 00E0 => GPU CLEAR
+      16'h00E0: begin gfx_cmd <= 3'd0; gfx_n <= 3'd4;         end // gfx_n = 4 is not important, but hopefully minimizes synthesis complexity
+      // DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision. If N=0 and extended mode, show 16x16 sprite.
+      16'hDxxx: begin gfx_cmd <= 3'd1; gfx_n <= opcode[0+:4]; end
+      // 00CN*    Scroll display N lines down
+      16'h00Cx: begin gfx_cmd <= 3'd2; gfx_n <= opcode[0+:4]; end
+      // 00FB*    Scroll display 4 pixels right
+      16'h00FB: begin gfx_cmd <= 3'd3; gfx_n <= 3'd4;         end
+      // 00FC*    Scroll display 4 pixels left
+      16'h00FC: begin gfx_cmd <= 3'd4; gfx_n <= 3'd4;         end
+      // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
+      16'h00Dx: begin gfx_cmd <= 3'd5; gfx_n <= opcode[0+:4]; end
+      default:  begin gfx_cmd <= 4'd0; gfx_n <= 3'd4;         end
+    endcase
 
   // --- States ---
-  localparam SPRESET     = 6'b000000; // reset? or something?
+  localparam SPRESET       = 6'b000000; // reset? or something?
   // -- GATED ON tick_en_instr --
-  localparam SREADHI     = 6'b000001; // read opcode high byte
+  localparam SREADHI       = 6'b000001; // read opcode high byte
   // S1B
-  localparam SREADLO     = 6'b000010; // read opcode low byte
+  localparam SREADLO       = 6'b000010; // read opcode low byte
   // scomp* compute states
-  localparam SCOMP_START = 6'b000100;
-  localparam SCOMP_ESETI = 6'b001100; // for I <= NNN + Vx we need to use spec_adder twice, which takes an extra cycle
+  localparam SCOMP_START   = 6'b000100;
+  localparam SCOMP_ESETI   = 6'b001100; // for I <= NNN + Vx we need to use spec_adder twice, which takes an extra cycle
+  localparam SCOMP_GFXWAIT = 6'b010100; // wait for gfx_busy to be zero
   // S1E
-  localparam SSETPC      = 6'h000011; // update PC value
+  localparam SSETPC        = 6'h000011; // update PC value
 
   // STAGE ONE - FETCH INSTRUCTION
   // - read 2 bytes @ PC from ram -> `opcode`
@@ -333,34 +353,18 @@ output reg [7:0]audio_pattern[15:0],
           16'hFx3A:           begin audio_pitch  <= vx;   spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
-          16'hFx01:      begin gfx_plane <= opcode[8+:4]; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
+          16'hFx01: begin gfx_plane <= opcode[8+:4];      spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
           // 00FE*    Disable extended screen mode
           // 00FF*    Enable extended screen mode for full-screen graphics
           16'h00FE, 16'h00FF: begin hires <= opcode[0];   spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // 00E0 => GPU CLEAR
-          // x   GPU, clear the screen
-          16'h00E0: begin
-            gfx_start <= 1'b1; gfx_cmd <= 3'd0;           spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
-
           // 00CN*    Scroll display N lines down
-          16'h00E0: begin
-            gfx_start <= 1'b1; gfx_cmd <= 3'd2;
-                                 gfx_n <= opcode[0+:4]    spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
           // 00FB*    Scroll display 4 pixels right
-          16'h00E0: begin
-            gfx_start <= 1'b1; gfx_cmd <= 3'd3;           spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
           // 00FC*    Scroll display 4 pixels left
-          16'h00E0: begin
-            gfx_start <= 1'b1; gfx_cmd <= 3'd4;           spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
           // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
-          16'h00E0: begin
-            gfx_start <= 1'b1; gfx_cmd <= 3'd5;
-                                 gfx_n <= opcode[0+:4]    spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
-
-          // Dxyn - DRW Vx, Vy, nibble
-          // x Display (XOR) n-byte sprite starting at memory location I at (Vx, Vy), set VF if any pixels are erased.
           // DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision. If N=0 and extended mode, show 16x16 sprite.
+          16'h00E0, 16'h00Cx, 16'h00FB, 16'h00FC, 16'h00Dx: begin gfx_start <= 1'b1; state <= SCOMP_GFXWAIT; end
 
           // Fx29 - LD F, Vx
           // x Set I = location of **5-byte** sprite for hex digit Vx.
@@ -398,6 +402,12 @@ output reg [7:0]audio_pattern[15:0],
         i <= spec_add_sum;
         spec_add_16b <= pc;
         spec_add_8b <= 8'd2;
+        state <= SSETPC;
+      end
+      SCOMP_GFXWAIT: if (~gfx_busy) begin
+        spec_add_16b <= pc;
+        spec_add_8b <= 8'd2;
+        state <= SSETPC;
       end
       SSETPC: begin
         // -- S1E --
@@ -405,6 +415,7 @@ output reg [7:0]audio_pattern[15:0],
         tmsound_load <= 1'b0;
         stack_pp <= 1'b0; // end stack operation
         reg_wclock <= 1'b0; // end reg write
+        gfx_start <= 1'b0; // end gfx op
         // -- normal SSETPC content --
         // update PC
         pc <= spec_add_sum[11:1];
@@ -414,215 +425,7 @@ output reg [7:0]audio_pattern[15:0],
         // next state
         state <= SREADHI;
       end
-      default state <= SPRESET;
+      default;
     endcase
   end
-
-  // XO-CHIP
-  // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i.
-  // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i.
-  // saveflags vx (0xFN75) save v0-vn to flag registers. (generalizing SCHIP).
-  // loadflags vx (0xFN85) restore v0-vn from flag registers. (generalizing SCHIP).
-  // i := long NNNN (0xF000, 0xNNNN) load i with a 16-bit address.
-  // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
-  // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer.
-  // pitch := vx (0xFX3A) set the audio pattern playback rate to 4000*2^((vx-64)/48)Hz.
-  // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
-
-  // SCHIP
-  // 00CN*    Scroll display N lines down
-  // 00FB*    Scroll display 4 pixels right
-  // 00FC*    Scroll display 4 pixels left
-  // 00FD*    Exit CHIP interpreter
-  // 00FE*    Disable extended screen mode
-  // 00FF*    Enable extended screen mode for full-screen graphics
-  // DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF :=
-  // FX30*    Point I to 10-byte font sprite for digit VX (0..9)
-  // FX75*    Store V0..VX in RPL user flags (X <= 7)
-  // FX85*    Read V0..VX from RPL user flags (X <= 7) 
-  
-  // STAGE TWO - COMPUTE INSTRUCTION
-  // 00EE => RET  S1B|    pp  <= 1   laa <= top lab <= 2     |--------------------------------->S1E
-  // 0NNN => IGN     |S1B            laa <= PC  lab <= 2     |--------------------------------->S1E
-  // 1NNN => JMP     |S1B            laa <= NNN lab <= 0     |--------------------------------->S1E
-  // 2NNN => CALL    |S1B pp  <= 1   laa <= NNN lab <= 0     |--------------------------------->S1E
-  // aNNN => LDI     |S1B i   <= NNN laa <= PC  lab <= 2     |--------------------------------->S1E
-  // bNNN => JMPO    |S1B            laa <= NNN lab <= V[0]  |--------------------------------->S1E
-  // Fx1E => ADI  S1B|               laa <= I   lab <= V[x]  |  I <= las  laa <= PC  lab <= 2  |S1E
-  // 
-  // 3XKK => SKIPEQ, 4KKK => SKIPNE, 5XY0 SKIPEQ
-  // 9XY0 => SKIPNE
-  // Ex9E - SKP Vx
-  // ExA1 - SKNP Vx
-  //              S1B|  <comp<=inp>                          |     laa <= PC  lab <= comp?2:0  |S1E
-  // (incorrect/updated)
-  // Fx0A - WAITK Vx
-  //              S1B|  <comp> Vx<=key laa<=PC  lab<=2   wait|--------------------------------->S1E
-  // (incorrect/updated)
-  // 
-  // 6XKK => LOAD X<=KK
-  // 7XKK => ADD X<=X+KK
-  //            |S1B  alu <= vxKK aluo <= op                 | vx <= alures laa <= PC lab <= 2 |S1E
-  // 8XYO => ALU OPERATION Vx/Vf <= OP Vx Vy
-  //            |S1B  alu <= vxvy aluo <= op                 | vx <= alures laa <= PC lab <= 2 |S1E
-  // cXKK => RNG Vx<=RAND&KK
-  //            |S1B  alu <= RRKK aluo <= &                  | vx <= alures laa <= PC lab <= 2 |S1E
-  // 
-  // Fx07 - LD Vx, DT
-  //            S1B|  vx <= dt laa <= PC lab <= 2            |--------------------------------->S1E
-  // Fx15 - LD DT, Vx
-  // Fx18 - LD ST, Vx
-  //            S1B| tmin<=Vx tmload<=1 laa<=PC lab<=2       |-------------------->tmload <= 0 S1E|
-  // 
-  // 00E0 => GPU CLEAR
-  // x   GPU, clear the screen
-  // Dxyn - DRW Vx, Vy, nibble
-  // x Display (XOR) n-byte sprite starting at memory location I at (Vx, Vy), set VF if any pixels are erased.
-  // 
-  // Fx29 - LD F, Vx
-  // x Set I = location of sprite for hex digit Vx.
-  // Fx33 - LD B, Vx
-  // x Store BCD representation of Vx in memory locations I, I+1, and I+2.
-  // Fx55 - LD [I], Vx
-  // x Store registers V0 through Vx in memory starting at location I.
-  // Fx65 - LD Vx, [I]
-  // x Read registers V0 through Vx from memory starting at location I.
-
-  
-  // -X-- can index Vx
-  // --Y- can index Vy
-  // ---N can be used for display (as the length of a sprite)
-  // --KK can be used as an arithmetic constant
-  // -NNN can be used as a 12-bit address
-
-  // i stack can be written at SP+1 (rel. to before cycle)
-  //   if (SP != 15) { stack[SP+1] <= PC }
-  // i SP can be incremented or decremented
-  //   SP <= select (opcode) { SP, SP + 1, SP - 1 }
-  // i PC can be set to stack[SP], NNN, NNN+V0, or be incremented by 4 (skip) or 2 (next)
-  //   ADD_A <= select (opcode) { stack[SP], PC, NNN }, ADD_B <= select (opcode) { 4, 2, 0, V0 } // not exactly implemented like this...
-  //   PC <= ADD_SUM
-
-  // x 1 << Vx & KB (with a dependent skip next instruction, either is pressed or is not pressed)
-  //   keypress <= AND(onehot(Vx) & KB)
-  //   PC_NEXT_FLAGS <= select (keypress, opcode) { PC+4, PC+2 }
-
-  // x Vx can be loaded with the value of the key that was just pressed (need to be able to diff the keyboard)
-  //   is_pressed <= OR(latest_keydown_since_last_cycle)
-  //   V[x] <= onehot_to_mbw(latest_keydown_...); PC_NEXT_FLAGS <= select (is_pressed) { PC+2, PC+0 }
-
-  // x Vx and Vy can have an arithmetic operation performed, with Vx, Vy, and KK as possible inputs
-  //   ALU_A <= V[x], ALU_B = select (opcode) { V[y], KK }
-  //   V[x] <= ALU_OUT
-  // x KK can be AND'd with a random number and stored in Vx
-  //   V[x] = RAND & KK (can dedicate an AND to this to make it single-cycle instead of using the ALU)
-  // x Vf can be set to carry (add), NOT borrow (sub), Vx[0]/Vx[7] (shr/shl) or collide (draw)
-  //   ... hold for operation to finish
-  //   V<f> = select (opcode) { ALU_FLAG, GPU_FLAG }
-  // x Vx can be loaded with the value of the delay timer
-  //   V[x] <= DELAY
-  // x DT and ST can be loaded with Vx
-  //   select (opcode) { DT, ST } <= V[x]
-  // x I can be loaded with NNN, incremented by Vx, or set to the location of the sprite for Vx. 
-  //   increment = I + V[x]; sprite = lookup(V[x])
-  //   I <= select (opcode) { I, NNN, increment, sprite }
-  // x BCD encoded Vx can be placed at I+:3
-  //   bcd = BCD(V[x])
-  //   max = 2
-  //   index = I
-  //   .. shared with next instr
-  // x registers V0..Vx can be written or read from memory at I
-  //   max = min(V[x], 15)
-  //   index = I
-  //   LOOP (one clock per)
-  //     index <= index + 1
-  //     .. TBD (maybe use I as the register and increment then decrement on the last cycle?)
-
-  // a BCD encoder of Vx needs to be available, the 3-byte output of which can be indexed
-
-  // One byte can be written or read from ram at a time
-
-  // GPU interface
-  // - clear the screen (instruction side-effect)
-  // - draw a sprite
-  //    - effect of possibly setting Vf
-  
-  // 00E0 =>
-  // x   GPU, clear the screen
-  // 00EE =>
-  // x    read stack @ SP into PC and [decrement SP]
-  // 0NNN => (old equivalent to 2NNN, ignored by modern interpreters)
-  // 1NNN =>
-  // x    set PC to NNN
-  // 2NNN =>
-  // x    [increment SP] and write PC to stack @ SP
-  // x    read NNN into PC
-  // 3XKK =>
-  // x    if Vx == KK,
-  // x        increment PC by 2
-  // 4XKK =>
-  // x    if Vx != KK,
-  // x        increment PC by 2
-  // 5XY0 =>
-  // x    if Vx == Vy,
-  // x        increment PC by 2
-  // 6XKK =>
-  // x   write KK to Vx
-  // 7XKK =>
-  // x   add KK to Vx and store the result in Vx
-  // 8XY0 =>
-  // x   write Vy to Vx
-  // 8XY1 =>
-  // x   write Vx | Vy to Vx
-  // 8XY2 =>
-  // x   write Vx & Vy to Vx
-  // 8XY3 =>
-  // x   write Vx ^ Vy to Vx
-  // 8XY4 =>
-  // x   write Vx + Vy to Vx, set Vf = carry
-  // 8XY5 =>
-  // x   write Vx - Vy to Vx, set Vf = NOT borrow
-  // 8XY6 =>
-  // x   write write Vx[0] to Vf
-  // x   write Vx >> 1 to Vx, 
-  // 8XY7 =>
-  // x   write Vy - Vx to Vx, set Vf = NOT borrow
-  // 8XYE =>
-  // x   write write Vx[7] to Vf
-  // x   write Vx << 1 to Vx, 
-  // 9XY0 =>
-  // x   if Vx != Vy,
-  // x       increment PC by 2
-  // aNNN =>
-  // x   set I to NNN
-  // bNNN =>
-  // x   add NNN and V0
-  // x    set PC to the result
-  // cXKK =>
-  // x   generate a random number
-  // x   AND it with KK, store in Vx
-  // Dxyn - DRW Vx, Vy, nibble
-  // x Display (XOR) n-byte sprite starting at memory location I at (Vx, Vy), set VF if any pixels are erased.
-  // Ex9E - SKP Vx
-  // x Skip next instruction if key with the value of Vx is pressed.
-  // ExA1 - SKNP Vx
-  // x Skip next instruction if key with the value of Vx is not pressed.
-  // Fx07 - LD Vx, DT
-  // x Set Vx = delay timer value.
-  // Fx0A - LD Vx, K
-  // x Wait for a key press, store the value of the key in Vx.
-  // Fx15 - LD DT, Vx
-  // x Set delay timer = Vx.
-  // Fx18 - LD ST, Vx
-  // x Set sound timer = Vx.
-  // Fx1E - ADD I, Vx
-  // x Set I = I + Vx.
-  // Fx29 - LD F, Vx
-  // x Set I = location of sprite for digit Vx.
-  // Fx33 - LD B, Vx
-  // x Store BCD representation of Vx in memory locations I, I+1, and I+2.
-  // Fx55 - LD [I], Vx
-  // x Store registers V0 through Vx in memory starting at location I.
-  // Fx65 - LD Vx, [I]
-  // x Read registers V0 through Vx from memory starting at location I.
 endmodule
