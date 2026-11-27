@@ -12,10 +12,10 @@ module CPU(
   input  [7:0] rand,      // random number
   output reg   tone,      // indicate to the audio subsystem that it should play a tone
   // memory
-  output [15:0] mem_addr,
-  output  [7:0] mem_read_data,
-  output  [7:0] mem_write_data,
-  output        mem_write_en,
+  output reg [15:0] mem_addr,
+  input       [7:0] mem_read_data,
+  output reg  [7:0] mem_write_data,
+  output reg        mem_write_en,
   // --- GFX ---
   // High for one cycle to start a command; all the graphics outputs below must already hold the right values. Only sent when ‘gfx_busy’ is 0.
   output reg gfx_start,
@@ -76,11 +76,31 @@ module CPU(
   wire      reg_write; // hold through clock to write reg_waddr
   wire [3:0]reg_waddr;
   wire [7:0]reg_wdata;
+  // Fx55 - LD [I], Vx   Store registers V0 through Vx in   memory starting at location I.
+  // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i. (ORDER CAN BE DECENDING OR ASCENDING!)
+  // saveflags vx (0xFN75) save v0-vn to flag registers. (generalizing SCHIP).
+  wire vx_is_vn;
+  assign vx_is_vn = opcode === 16'hFx55 | opcode === 16'h5xx2 | opcode === 16'hFx75;
+  // bNNN => JMPO S1B|            laa <= NNN lab <= V[0]  |--------------------------------->S1E
+  wire vx_is_v0;
+  assign vx_is_v0 = opcode === 16'hBxxx;
   CPU_REG_FILE registers(
-    .rd_x(opcode[8+:4]), .vx(vx),
+    .rd_x(vx_is_v0 ? 4'h0 : (vx_is_vn ? lr_offset: opcode[8+:4])), .vx(vx),
     .rd_y(opcode[4+:4]), .vy(vy),
     .clock(tick_fsm),
     .write(reg_write), .write_addr(reg_waddr), .write_data(reg_wdata),
+  );
+
+  // --- Flag Registers --- 
+  wire [7:0] rfl_x; // used by opcodes generally
+  wire      rfl_write; // hold through clock to write rfl_waddr
+  wire [3:0]rfl_waddr;
+  wire [7:0]rfl_wdata;
+  CPU_REG_FILE flag_registers(
+    .rd_x(lr_offset), .vx(rfl_x),
+    .rd_y(8'b0),
+    .clock(tick_fsm),
+    .write(rfl_write), .write_addr(rfl_waddr), .write_data(rfl_wdata),
   );
 
   // --- Program Counter and Index Register---
@@ -250,6 +270,10 @@ module CPU(
       16'hF002: lw_end_offset <= 4'd15;
       default:  lw_end_offset <= 4'd0;
     endcase
+  // offsets
+  reg [3:0]lw_offset;
+  wire [3:0]lr_offset;
+  assign lr_offset = lw_read_direction ? lw_offset : 4'd15 - lw_offset;
 
   // --- States ---
   localparam SPRESET       = 6'b000000; // reset? or something?
@@ -262,23 +286,19 @@ module CPU(
   localparam SCOMP_ESETI   = 6'b001100; // for I <= NNN + Vx we need to use spec_adder twice, which takes an extra cycle
   localparam SCOMP_GFXWAIT = 6'b010100; // wait for gfx_busy to be zero
   localparam SCOMP_ALUWFLG = 6'b011100; // alu writeback flag
+  // for large data transfer operations...
+  localparam SCOMP_LD_SWMEM= 6'h1xx1xx; // save/write memory
+  localparam SCOMP_LD_LFMEM= 6'h1xx1xx; // load/read memory
+  localparam SCOMP_LD_LWREG= 6'h1xx1xx; // load/write registers
+  localparam SCOMP_LD_SFLAG= 6'h1xx1xx; // save to flags
+  localparam SCOMP_LD_LAUD2= 6'h1xx1xx; // save to audio buffer
+  localparam SCOMP_LD_LDONE= 6'h1xx1xx; // clean up
   // S1E
   localparam SSETPC        = 6'h000011; // update PC value
 
   // STAGE ONE - FETCH INSTRUCTION
   // - read 2 bytes @ PC from ram -> `opcode`
   // bytes in ram are ->>> HILO so we read HI of opcode and then LO
-  // 
-  // S1E (after end of normal cycle)
-  // addr bus <- PC
-  // operation <- read
-  // ---
-  // opcode[4+:4] <- data bus
-  // addr bus <- PC+1
-  // ---
-  // opcode[0+:4] <- data bus
-  // S1B (before begin of normal cycle, only lower bits of opcode are determined)
-  // Named States -- S1L | S1B | S2X | S2Y | S1E -> (loop) 
 
   always @(posedge tick_fsm) if (~halted) begin
     casez (state)
@@ -291,11 +311,12 @@ module CPU(
         state <= SREADLO;
       end
       SREADLO: begin
+        // ...actually, at this point we *do* know what the full opcode is...
         opcode[0+:8] <= mem_read_data;
         // -- S1B --
         if (fetch_large_argument) begin
           // phase II of 0xF000 `LDI long`
-          i <= fetch_large_argument;
+          i <= {opcode[8+:8], mem_read_data};
           spec_add_16b <= pc;
           spec_add_8b <= 8'd2;
           state <= SSETPC;
@@ -318,7 +339,7 @@ module CPU(
           // aNNN => LDI  S1B| i   <= NNN laa <= PC  lab <= 2     |--------------------------------->S1E
           16'hAxxx: begin i <= nnn       spec_add_16b <= pc;        spec_add_8b <= 8'd2; state <= SSETPC; end
           // bNNN => JMPO S1B|            laa <= NNN lab <= V[0]  |--------------------------------->S1E
-          16'hBxxx: begin                spec_add_16b <= nnn;       spec_add_8b <= v0;   state <= SSETPC; end
+          16'hBxxx: begin                spec_add_16b <= nnn;       spec_add_8b <= vx;   state <= SSETPC; end
           // Fx1E => ADI  S1B|            laa <= I   lab <= V[x]  |  I <= las  laa <= PC  lab <= 2  |S1E
           16'hFx1E: begin                spec_add_16b <= i;         spec_add_8b <= vx;   state <= SCOMP_ESETI; end
 
@@ -377,71 +398,26 @@ module CPU(
           // FX30*    Point I to **10-byte** font sprite for digit VX (0..9)
           16'hFx29, 16'hFx30: begin i <= char_addr; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
-          // inputs 
-          //   - vx_as_bcd (len 3)
-          //   - M(I+:16) (len 16)
-          // outputs
-          //   - M(I+:3)
-          //   - audio_pattern
-          //
-          // inputs and outputs
-          //   x V0-Vx  (len Vx+1) (generalized)
-          //   x M(I+:Vx+1) (len Vx+1) (generalized)
-          // 
-          //   - F0-Fx  (end offset Vx)
-          //   - Vx-Vy  (end offset (x > y ? x - y : y - x))
-          //   - M(I+:len) (end offset ^^)
-        
-          // wire lw_read_direction;
-          // reg [3:0]lw_end_offset;
-          // reg [3:0]lw_offset;
-          // wire [3:0]lr_offset;
-          // assign lr_offset = lw_read_direction ? lw_offset : 4'd15 - lw_offset;
-          // 
-          // wire      reg_write; // hold through clock to write reg_waddr
-          // wire [3:0]reg_waddr;
-          // wire [7:0]reg_wdata;
-          //
           // --- init
-          // lw_offset <= 0
           // laa <= i
-          // lab <= 0 (lw_offset)
-          // reg_wclockg <= write registers?
+          // lw_offset, lab <= 0
           // state <= case () ...
-          // 
-          // --- BCD 
-          // mem_addr <= las,
-          // mem_write_data <= vx_as_bcd[lr_offset],
-          // mem_write_en <= 1,
-          //
-          // if lw_offset >= lw_end_offset
-          //   state <= SCOMP_LWDONE
-          //
-          // --- Fx55/5xy2 (WMEM)
-          // 
-          // --- Fx55/5xy2 (RMEM)
-          //
-          // --- Fx75 (WFLAG)
-          //
-          // --- Fx85 (RFLAG)
-          //
-          // --- SCOMP_LWDONE
-          // mem_write_en <= 1'b0;
-          // spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC;
-
+          // ---
           // Fx33 - LD B, Vx   Store BCD representation of Vx in memory locations I, I+1, and I+2.
-
+          16'hFx33          : begin laa <= i; lw_offset <= 8'b0; lab <= 8'b0; state <= SCOMP_LD_SWMEM; end
           // Fx55 - LD [I], Vx   Store registers V0 through Vx in   memory starting at location I.
+          // 5XY2 save an inclusive range of registers to memory starting at i. (ORDER CAN BE DECENDING OR ASCENDING!)
+          16'hFx55, 16'h5xx2: begin laa <= i; lw_offset <= 8'b0; lab <= 8'b0; state <= SCOMP_LD_SWMEM; end
           // Fx65 - LD Vx, [I]   Read  registers V0 through Vx from memory starting at location I.
+          // 5XY3 load an inclusive range of registers from memory starting at i. (ORDER CAN BE DESCENDING OR ASCENDING!)
+          16'hFx65, 16'h5xx3: begin laa <= i; lw_offset <= 8'b0; lab <= 8'b0; state <= SCOMP_LD_LFMEM; end
+          // FN75 save v0-vn to flag registers. (generalizing SCHIP).
+          16'hFx75          : begin laa <= i; lw_offset <= 8'b0; lab <= 8'b0; state <= SCOMP_LD_SFLAG; end
+          // FN85 restore v0-vn from flag registers. (generalizing SCHIP).
+          16'hFx85          : begin laa <= i; lw_offset <= 8'b0; lab <= 8'b0; state <= SCOMP_LD_LWREG; end
+          // F002 store 16 bytes starting at i in the audio pattern buffer.
+          16'hF002          : begin laa <= i; lw_offset <= 8'b0; lab <= 8'b0; state <= SCOMP_LD_LFMEM; end
 
-          // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i. (ORDER CAN BE DECENDING OR ASCENDING!)
-          // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i. (ORDER CAN BE DESCENDING OR ASCENDING!)
-
-          // saveflags vx (0xFN75) save v0-vn to flag registers. (generalizing SCHIP).
-          // loadflags vx (0xFN85) restore v0-vn from flag registers. (generalizing SCHIP).
-
-          // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer.
-                    
           // 00FD*    Exit CHIP interpreter
           16'h00FD: begin halted <= 1'b1; end
           
@@ -472,6 +448,68 @@ module CPU(
         spec_add_16b <= pc;
         spec_add_8b <= 8'd2;
         state <= SSETPC;
+      end
+      // Fx33 (SWMEM) (same as for Fx55/5xy2)
+      // Fx55/5xy2 (SWMEM) (same as for BCD) (regs must already be reading based on opcode--)
+      SCOMP_LD_SWMEM: begin
+        // shared code
+        mem_write_en <= 1'b1;
+        mem_addr <= spec_add_sum;
+        // branch based on opcode
+        if (opcode === 16'hFx33)
+          mem_write_data <= vx_as_bcd[lr_offset];
+        else
+          mem_write_data <= vx;
+        // >>LOOP
+        {lw_offset, spec_add_8b} <= {2{lw_offset + 8'b1}};
+        if (lw_offset >= lw_end_offset)
+          state <= SCOMP_LD_LDONE;
+      end
+      // Fx65/5xy3 (LFMEM) (same as for F002)
+      // F002 (LFMEM) (same for Fx65/5xy3)
+      SCOMP_LD_LFMEM: begin
+        reg_write <= 1'b0; // redundant? for some variants?
+        mem_addr <= spec_add_sum;
+      end
+      // -- Fx65/5xy3 p2 (LWREG) (same as Fx85) // mem_read_data is set
+      // --- Fx85 (LWREG) (same as Fx65/5xy3) (rfl must already be reading based on opcode--)
+      SCOMP_LD_LWREG: begin
+        // shared code
+        reg_write <= 1'b1;
+        reg_waddr <= lr_offset;
+        // branch based on opcode
+        if (opcode === 16'hFx85)
+          reg_wdata <= rfl_x; // (active flag register)
+        else
+          reg_wdata <= mem_read_data;
+        // >>LOOP
+        {lw_offset, spec_add_8b} <= {2{lw_offset + 8'b1}};
+        if (lw_offset >= lw_end_offset)
+          state <= SCOMP_LD_LDONE;
+        else if (opcode === 16'hFx65 | opcode === 16'hFxx3)
+          state <= SCOMP_LD_LFMEM;
+      end
+      // --- Fx75 (SFLAG) (regs must already be reading based on opcode--)
+      SCOMP_LD_SFLAG: begin
+        rfl_write <= 1'b1;
+        rfl_waddr <= lr_offset;
+        rfl_wdata <= vx;
+      end
+      // -- F002 p2 LDAUD2 // mem_read_data is set
+      SCOMP_LD_LAUD2: begin
+        audio_pattern[lr_offset] <= mem_read_data;
+        // >>LOOP
+        {lw_offset, spec_add_8b} <= {2{lw_offset + 8'b1}};
+        if (lw_offset >= lw_end_offset)
+          state <= SCOMP_LD_LDONE;
+        else
+          state <= SCOMP_LD_LFMEM;
+      end
+      SCOMP_LD_LDONE: begin
+        mem_write_en <= 1'b0;
+        reg_write <= 1'b0;
+        rfl_write <= 1'b0;
+        spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC;
       end
       SSETPC: begin
         // -- S1E --
