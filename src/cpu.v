@@ -226,6 +226,8 @@ output reg [7:0]audio_pattern[15:0],
   assign dbg_opcode = opcode;
 
   // --- Graphics ---
+  wire [15:0]char_addr;
+  CPU_CHAR_ADDR_LUT lu1(.hex_char(vx), .hires(opcode === 16'hFx30), .address(char_addr));
   assign gfx_i = i;
   assign gfx_x = vx;
   assign gfx_y = vy;
@@ -368,8 +370,8 @@ output reg [7:0]audio_pattern[15:0],
 
           // Fx29 - LD F, Vx
           // x Set I = location of **5-byte** sprite for hex digit Vx.
-
           // FX30*    Point I to **10-byte** font sprite for digit VX (0..9)
+          16'hFx29, 16'hFx30: begin i <= char_addr; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // Fx33 - LD B, Vx
           // x Store BCD representation of Vx in memory locations I, I+1, and I+2.
