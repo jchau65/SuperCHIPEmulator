@@ -17,23 +17,23 @@ module CPU(
   output  [7:0] mem_write_data,
   output        mem_write_en,
   // --- GFX ---
-// High for one cycle to start a command; all the graphics outputs below must already hold the right values. Only sent when ‘gfx_busy’ is 0.
-output gfx_start,
-// Picks the command for the graphics
-// 0 → CLEAR
-// XO-CHIP also clears the screen when switching between lo-res and hi-res.
-// 1 → DRAW
-// 2 → SCROLL DOWN
-// 3 → SCROLL RIGHT
-// 4 → SCROLL LEFT
-// 5 → SCROLL UP (XO-CHIP only)
-output [2:0] gfx_cmd,
+  // High for one cycle to start a command; all the graphics outputs below must already hold the right values. Only sent when ‘gfx_busy’ is 0.
+  output reg gfx_start,
+  // Picks the command for the graphics
+  // 0 → CLEAR
+  // XO-CHIP also clears the screen when switching between lo-res and hi-res.
+  // 1 → DRAW
+  // 2 → SCROLL DOWN
+  // 3 → SCROLL RIGHT
+  // 4 → SCROLL LEFT
+  // 5 → SCROLL UP (XO-CHIP only)
+  output reg [2:0] gfx_cmd,
 // Value of VX/VY label: which is where the sprite’s left edge goes
 output [7:0] gfx_x, gfx_y,
-// For DRAW: dictates how many rows tall the sprite is (1-15; 0 means a 16x16 sprite, 1-15 means N rows and 8 wide). This is how the original CHIP-8 sprite works
-// SUPER CHIP does 8x16 in lo-res mode when gfx_n is 0
-// For SCROLL DOWN/UP: dictates how many rows to scroll
-output [3:0] gfx_n,
+  // For DRAW: dictates how many rows tall the sprite is (1-15; 0 means a 16x16 sprite, 1-15 means N rows and 8 wide). This is how the original CHIP-8 sprite works
+  // SUPER CHIP does 8x16 in lo-res mode when gfx_n is 0
+  // For SCROLL DOWN/UP: dictates how many rows to scroll
+  output [3:0] gfx_n,
   // Value of I: the memory address of the sprite’s first byte. 16 bits for XO-CHIP
   output [15:0] gfx_i,
   // Dictates which color layer(s) a command affects. Bit 0 = plane 1, bit 1 = plane 2.
@@ -333,19 +333,30 @@ output reg [7:0]audio_pattern[15:0],
           16'hFx3A:           begin audio_pitch  <= vx;   spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
-          16'hFx01: begin gfx_plane <= opcode[8+:4];    spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
+          16'hFx01:      begin gfx_plane <= opcode[8+:4]; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
           // 00FE*    Disable extended screen mode
           // 00FF*    Enable extended screen mode for full-screen graphics
-          16'h00FE, 16'h00FF: begin hires <= opcode[0]; spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
+          16'h00FE, 16'h00FF: begin hires <= opcode[0];   spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // 00E0 => GPU CLEAR
           // x   GPU, clear the screen
+          16'h00E0: begin
+            gfx_start <= 1'b1; gfx_cmd <= 3'd0;           spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // 00CN*    Scroll display N lines down
+          16'h00E0: begin
+            gfx_start <= 1'b1; gfx_cmd <= 3'd2;
+                                 gfx_n <= opcode[0+:4]    spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
           // 00FB*    Scroll display 4 pixels right
+          16'h00E0: begin
+            gfx_start <= 1'b1; gfx_cmd <= 3'd3;           spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
           // 00FC*    Scroll display 4 pixels left
-
+          16'h00E0: begin
+            gfx_start <= 1'b1; gfx_cmd <= 3'd4;           spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
           // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
+          16'h00E0: begin
+            gfx_start <= 1'b1; gfx_cmd <= 3'd5;
+                                 gfx_n <= opcode[0+:4]    spec_add_16b <= pc; spec_add_8b <= 8'd2; state <= SSETPC; end
 
           // Dxyn - DRW Vx, Vy, nibble
           // x Display (XOR) n-byte sprite starting at memory location I at (Vx, Vy), set VF if any pixels are erased.
