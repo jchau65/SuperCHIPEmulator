@@ -287,12 +287,12 @@ module CPU(
   localparam SCOMP_GFXWAIT = 6'b010100; // wait for gfx_busy to be zero
   localparam SCOMP_ALUWFLG = 6'b011100; // alu writeback flag
   // for large data transfer operations...
-  localparam SCOMP_LD_SWMEM= 6'h1xx1xx; // save/write memory
-  localparam SCOMP_LD_LFMEM= 6'h1xx1xx; // load/read memory
-  localparam SCOMP_LD_LWREG= 6'h1xx1xx; // load/write registers
-  localparam SCOMP_LD_SFLAG= 6'h1xx1xx; // save to flags
-  localparam SCOMP_LD_LAUD2= 6'h1xx1xx; // save to audio buffer
-  localparam SCOMP_LD_LDONE= 6'h1xx1xx; // clean up
+  localparam SCOMP_LD_SWMEM= 6'h100100; // save/write memory
+  localparam SCOMP_LD_LFMEM= 6'h101100; // load/read memory
+  localparam SCOMP_LD_LWREG= 6'h110100; // load/write registers
+  localparam SCOMP_LD_SFLAG= 6'h111100; // save to flags
+  localparam SCOMP_LD_LAUD2= 6'h100101; // save to audio buffer
+  localparam SCOMP_LD_LDONE= 6'h101101; // clean up
   // S1E
   localparam SSETPC        = 6'h000011; // update PC value
 
